@@ -51,7 +51,7 @@ HAS_ERROR=false
 echo ""
 echo "  ╔══════════════════════════════════════════════════════════════╗"
 echo "  ║  🏯 multi-agent-shogun インストーラー                         ║"
-echo "  ║     Initial Setup Script for Ubuntu / WSL                    ║"
+echo "  ║     Initial Setup Script for Ubuntu / WSL / macOS             ║"
 echo "  ╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "  このスクリプトは初回セットアップ用です。"
@@ -66,23 +66,31 @@ echo ""
 log_step "STEP 1: システム環境チェック"
 
 # OS情報を取得
-if [ -f /etc/os-release ]; then
+IS_WSL=false
+IS_MACOS=false
+UNAME_S="$(uname -s)"
+
+if [ "$UNAME_S" = "Darwin" ]; then
+    OS_NAME="macOS"
+    OS_VERSION="$(sw_vers -productVersion 2>/dev/null || echo 'unknown')"
+    IS_MACOS=true
+    log_info "OS: $OS_NAME $OS_VERSION"
+    log_info "環境: macOS"
+elif [ -f /etc/os-release ]; then
     . /etc/os-release
     OS_NAME=$NAME
     OS_VERSION=$VERSION_ID
     log_info "OS: $OS_NAME $OS_VERSION"
+    # WSL チェック
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+        log_info "環境: WSL (Windows Subsystem for Linux)"
+        IS_WSL=true
+    else
+        log_info "環境: Native Linux"
+    fi
 else
     OS_NAME="Unknown"
     log_warn "OS情報を取得できませんでした"
-fi
-
-# WSL チェック
-if grep -qi microsoft /proc/version 2>/dev/null; then
-    log_info "環境: WSL (Windows Subsystem for Linux)"
-    IS_WSL=true
-else
-    log_info "環境: Native Linux"
-    IS_WSL=false
 fi
 
 RESULTS+=("システム環境: OK")
@@ -130,8 +138,19 @@ else
             RESULTS+=("tmux: インストール失敗")
             HAS_ERROR=true
         fi
+    elif command -v brew &> /dev/null; then
+        log_info "brew で tmux をインストール中..."
+        if brew install tmux 2>/dev/null; then
+            TMUX_VERSION=$(tmux -V | awk '{print $2}')
+            log_success "tmux インストール完了 (v$TMUX_VERSION)"
+            RESULTS+=("tmux: インストール完了 (v$TMUX_VERSION)")
+        else
+            log_error "tmux のインストールに失敗しました"
+            RESULTS+=("tmux: インストール失敗")
+            HAS_ERROR=true
+        fi
     else
-        log_error "apt-get が見つかりません。手動で tmux をインストールしてください"
+        log_error "apt-get / brew が見つかりません。手動で tmux をインストールしてください"
         echo ""
         echo "  インストール方法:"
         echo "    Ubuntu/Debian: sudo apt-get install tmux"
@@ -249,7 +268,7 @@ fi
 # ============================================================
 # STEP 4.5: Python3 / PyYAML / inotify-tools チェック
 # ============================================================
-log_step "STEP 4.5: Python3 / PyYAML / inotify-tools チェック"
+log_step "STEP 4.5: Python3 / PyYAML / ファイルウォッチャー / flock チェック"
 
 # --- python3 ---
 if command -v python3 &> /dev/null; then
@@ -270,8 +289,19 @@ else
             RESULTS+=("python3: インストール失敗")
             HAS_ERROR=true
         fi
+    elif command -v brew &> /dev/null; then
+        log_info "brew で python3 をインストール中..."
+        if brew install python3 2>/dev/null; then
+            PY3_VERSION=$(python3 --version 2>&1)
+            log_success "python3 インストール完了 ($PY3_VERSION)"
+            RESULTS+=("python3: インストール完了 ($PY3_VERSION)")
+        else
+            log_error "python3 のインストールに失敗しました"
+            RESULTS+=("python3: インストール失敗")
+            HAS_ERROR=true
+        fi
     else
-        log_error "apt-get が見つかりません。手動で python3 をインストールしてください"
+        log_error "apt-get / brew が見つかりません。手動で python3 をインストールしてください"
         RESULTS+=("python3: 未インストール (手動インストール必要)")
         HAS_ERROR=true
     fi
@@ -294,32 +324,102 @@ else
             HAS_ERROR=true
         fi
     else
-        log_error "apt-get が見つかりません。手動で python3-yaml をインストールしてください"
-        RESULTS+=("PyYAML: 未インストール (手動インストール必要)")
-        HAS_ERROR=true
+        # macOS: pip3 で PyYAML をインストール（externally-managed対策あり）
+        log_info "pip3 で PyYAML をインストール中..."
+        if pip3 install pyyaml 2>/dev/null; then
+            log_success "PyYAML インストール完了 (pip3)"
+            RESULTS+=("PyYAML: インストール完了 (pip3)")
+        elif pip3 install --break-system-packages pyyaml 2>/dev/null; then
+            log_success "PyYAML インストール完了 (pip3 --break-system-packages)"
+            RESULTS+=("PyYAML: インストール完了 (pip3)")
+        else
+            log_error "PyYAML のインストールに失敗しました"
+            echo "  手動で以下を実行してください:"
+            echo "    pip3 install --break-system-packages pyyaml"
+            RESULTS+=("PyYAML: インストール失敗")
+            HAS_ERROR=true
+        fi
     fi
 fi
 
-# --- inotify-tools (inotifywait) ---
-if command -v inotifywait &> /dev/null; then
-    log_success "inotify-tools がインストール済みです"
-    RESULTS+=("inotify-tools: OK")
-else
-    log_warn "inotify-tools がインストールされていません"
-    if command -v apt-get &> /dev/null; then
-        log_info "inotify-tools をインストール中..."
-        if sudo apt-get install -y inotify-tools 2>/dev/null; then
-            log_success "inotify-tools インストール完了"
-            RESULTS+=("inotify-tools: インストール完了")
+# --- ファイルウォッチャー: inotifywait (Linux) or fswatch (macOS) ---
+if [ "$IS_MACOS" = true ]; then
+    # macOS: fswatch を使用
+    if command -v fswatch &> /dev/null; then
+        log_success "fswatch がインストール済みです（macOS用ファイルウォッチャー）"
+        RESULTS+=("ファイルウォッチャー: OK (fswatch)")
+    else
+        log_warn "fswatch がインストールされていません"
+        if command -v brew &> /dev/null; then
+            log_info "brew で fswatch をインストール中..."
+            if brew install fswatch 2>/dev/null; then
+                log_success "fswatch インストール完了"
+                RESULTS+=("ファイルウォッチャー: インストール完了 (fswatch)")
+            else
+                log_error "fswatch のインストールに失敗しました"
+                RESULTS+=("ファイルウォッチャー: インストール失敗")
+                HAS_ERROR=true
+            fi
         else
-            log_error "inotify-tools のインストールに失敗しました"
-            RESULTS+=("inotify-tools: インストール失敗")
+            log_error "brew が見つかりません。手動で fswatch をインストールしてください"
+            echo "    brew install fswatch"
+            RESULTS+=("ファイルウォッチャー: 未インストール (手動インストール必要)")
+            HAS_ERROR=true
+        fi
+    fi
+else
+    # Linux: inotify-tools を使用
+    if command -v inotifywait &> /dev/null; then
+        log_success "inotify-tools がインストール済みです"
+        RESULTS+=("ファイルウォッチャー: OK (inotify-tools)")
+    else
+        log_warn "inotify-tools がインストールされていません"
+        if command -v apt-get &> /dev/null; then
+            log_info "inotify-tools をインストール中..."
+            if sudo apt-get install -y inotify-tools 2>/dev/null; then
+                log_success "inotify-tools インストール完了"
+                RESULTS+=("ファイルウォッチャー: インストール完了 (inotify-tools)")
+            else
+                log_error "inotify-tools のインストールに失敗しました"
+                RESULTS+=("ファイルウォッチャー: インストール失敗")
+                HAS_ERROR=true
+            fi
+        else
+            log_error "apt-get が見つかりません。手動で inotify-tools をインストールしてください"
+            RESULTS+=("ファイルウォッチャー: 未インストール (手動インストール必要)")
+            HAS_ERROR=true
+        fi
+    fi
+fi
+
+# --- flock (macOS では別途インストールが必要) ---
+if command -v flock &> /dev/null; then
+    log_success "flock がインストール済みです"
+    RESULTS+=("flock: OK")
+else
+    if [ "$IS_MACOS" = true ]; then
+        log_warn "flock がインストールされていません（inbox_write.sh で必要）"
+        if command -v brew &> /dev/null; then
+            log_info "brew で flock をインストール中..."
+            if brew install flock 2>/dev/null; then
+                log_success "flock インストール完了"
+                RESULTS+=("flock: インストール完了")
+            else
+                log_error "flock のインストールに失敗しました"
+                echo "    brew install flock"
+                RESULTS+=("flock: インストール失敗")
+                HAS_ERROR=true
+            fi
+        else
+            log_error "brew が見つかりません。手動で flock をインストールしてください"
+            echo "    brew install flock"
+            RESULTS+=("flock: 未インストール (手動インストール必要)")
             HAS_ERROR=true
         fi
     else
-        log_error "apt-get が見つかりません。手動で inotify-tools をインストールしてください"
-        RESULTS+=("inotify-tools: 未インストール (手動インストール必要)")
-        HAS_ERROR=true
+        # Linux: flock は util-linux に含まれているので通常はインストール済み
+        log_info "flock は通常 Linux に同梱されています（util-linux パッケージ）"
+        RESULTS+=("flock: 未検出 (util-linux を確認してください)")
     fi
 fi
 
@@ -406,12 +506,17 @@ if [ "$NEED_CLAUDE_INSTALL" = true ]; then
     # PATHを更新（インストール直後は反映されていない可能性）
     export PATH="$HOME/.local/bin:$PATH"
 
-    # .bashrc に永続化（重複追加を防止）
-    if ! grep -q 'export PATH="\$HOME/.local/bin:\$PATH"' "$HOME/.bashrc" 2>/dev/null; then
-        echo '' >> "$HOME/.bashrc"
-        echo '# Claude Code CLI PATH (added by first_setup.sh)' >> "$HOME/.bashrc"
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-        log_info "~/.local/bin を ~/.bashrc の PATH に追加しました"
+    # シェル設定ファイルに永続化（重複追加を防止）
+    if [ "$IS_MACOS" = true ]; then
+        SHELL_RC="$HOME/.zshrc"
+    else
+        SHELL_RC="$HOME/.bashrc"
+    fi
+    if ! grep -q 'export PATH="\$HOME/.local/bin:\$PATH"' "$SHELL_RC" 2>/dev/null; then
+        echo '' >> "$SHELL_RC"
+        echo '# Claude Code CLI PATH (added by first_setup.sh)' >> "$SHELL_RC"
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
+        log_info "~/.local/bin を $SHELL_RC の PATH に追加しました"
     fi
 
     if command -v claude &> /dev/null; then
@@ -488,6 +593,12 @@ log_step "STEP 7: 設定ファイル確認"
 # config/settings.yaml
 if [ ! -f "$SCRIPT_DIR/config/settings.yaml" ]; then
     log_info "config/settings.yaml を作成中..."
+    # macOS ではデフォルトシェルを zsh に設定
+    if [ "$IS_MACOS" = true ]; then
+        DEFAULT_SHELL="zsh"
+    else
+        DEFAULT_SHELL="bash"
+    fi
     cat > "$SCRIPT_DIR/config/settings.yaml" << EOF
 # multi-agent-shogun 設定ファイル
 
@@ -500,7 +611,7 @@ language: ja
 # シェル設定
 # bash: bash用プロンプト（デフォルト）
 # zsh: zsh用プロンプト
-shell: bash
+shell: $DEFAULT_SHELL
 
 # スキル設定
 skill:
@@ -626,8 +737,13 @@ RESULTS+=("実行権限: OK")
 # ============================================================
 log_step "STEP 10: alias設定"
 
-# alias追加対象ファイル
-BASHRC_FILE="$HOME/.bashrc"
+# alias追加対象ファイル（macOSではzshrc）
+if [ "$IS_MACOS" = true ]; then
+    BASHRC_FILE="$HOME/.zshrc"
+    touch "$BASHRC_FILE" 2>/dev/null  # zshrcが存在しない場合に備えて作成
+else
+    BASHRC_FILE="$HOME/.bashrc"
+fi
 
 # aliasが既に存在するかチェックし、なければ追加
 ALIAS_ADDED=false
@@ -644,7 +760,12 @@ if [ -f "$BASHRC_FILE" ]; then
         ALIAS_ADDED=true
     elif ! grep -qF "$EXPECTED_CSS" "$BASHRC_FILE" 2>/dev/null; then
         # alias は存在するがパスが異なる → 更新
-        if sed -i "s|alias css=.*|$EXPECTED_CSS|" "$BASHRC_FILE" 2>/dev/null; then
+        if [ "$IS_MACOS" = true ]; then
+            sed -i '' "s|alias css=.*|$EXPECTED_CSS|" "$BASHRC_FILE" 2>/dev/null && SED_OK=true || SED_OK=false
+        else
+            sed -i "s|alias css=.*|$EXPECTED_CSS|" "$BASHRC_FILE" 2>/dev/null && SED_OK=true || SED_OK=false
+        fi
+        if [ "$SED_OK" = true ]; then
             log_info "alias css を更新しました（パス変更検出）"
         else
             log_warn "alias css の更新に失敗しました"
@@ -665,7 +786,12 @@ if [ -f "$BASHRC_FILE" ]; then
         log_info "alias csm を追加しました（家老・足軽ウィンドウの起動）"
         ALIAS_ADDED=true
     elif ! grep -qF "$EXPECTED_CSM" "$BASHRC_FILE" 2>/dev/null; then
-        if sed -i "s|alias csm=.*|$EXPECTED_CSM|" "$BASHRC_FILE" 2>/dev/null; then
+        if [ "$IS_MACOS" = true ]; then
+            sed -i '' "s|alias csm=.*|$EXPECTED_CSM|" "$BASHRC_FILE" 2>/dev/null && SED_OK=true || SED_OK=false
+        else
+            sed -i "s|alias csm=.*|$EXPECTED_CSM|" "$BASHRC_FILE" 2>/dev/null && SED_OK=true || SED_OK=false
+        fi
+        if [ "$SED_OK" = true ]; then
             log_info "alias csm を更新しました（パス変更検出）"
         else
             log_warn "alias csm の更新に失敗しました"
@@ -680,10 +806,14 @@ fi
 
 if [ "$ALIAS_ADDED" = true ]; then
     log_success "alias設定を追加しました"
-    log_warn "alias を反映するには、以下のいずれかを実行してください："
-    log_info "  1. source ~/.bashrc"
-    log_info "  2. PowerShell で 'wsl --shutdown' してからターミナルを開き直す"
-    log_info "  ※ ウィンドウを閉じるだけでは WSL が終了しないため反映されません"
+    log_warn "alias を反映するには、以下を実行してください："
+    if [ "$IS_MACOS" = true ]; then
+        log_info "  source ~/.zshrc"
+    else
+        log_info "  1. source ~/.bashrc"
+        log_info "  2. PowerShell で 'wsl --shutdown' してからターミナルを開き直す"
+        log_info "  ※ ウィンドウを閉じるだけでは WSL が終了しないため反映されません"
+    fi
 fi
 
 RESULTS+=("alias設定: OK")
@@ -740,7 +870,11 @@ EOF
     log_info "メモリキャッシュを即時クリアするには以下を実行:"
     echo "  sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'"
 else
-    log_info "WSL環境ではないため、メモリ最適化設定をスキップ"
+    if [ "$IS_MACOS" = true ]; then
+        log_info "macOS環境のため、WSLメモリ最適化設定をスキップ"
+    else
+        log_info "WSL環境ではないため、メモリ最適化設定をスキップ"
+    fi
 fi
 
 # ============================================================
@@ -812,7 +946,11 @@ echo ""
 echo "  ⚠️  初回のみ: 以下を手動で実行してください"
 echo ""
 echo "  STEP 0: PATHの反映（このシェルにインストール結果を反映）"
+if [ "$IS_MACOS" = true ]; then
+echo "     source ~/.zshrc"
+else
 echo "     source ~/.bashrc"
+fi
 echo ""
 echo "  STEP A: OAuth認証 + Bypass Permissions の承認（1コマンドで完了）"
 echo "     claude --dangerously-skip-permissions"

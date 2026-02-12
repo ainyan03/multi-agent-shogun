@@ -301,13 +301,17 @@ fi
 # queue ディレクトリが存在しない場合は作成（初回起動時に必要）
 [ -d ./queue/reports ] || mkdir -p ./queue/reports
 [ -d ./queue/tasks ] || mkdir -p ./queue/tasks
-# inbox はLinux FSにシンボリックリンク（WSL2の/mnt/c/ではinotifywaitが動かないため）
-INBOX_LINUX_DIR="$HOME/.local/share/multi-agent-shogun/inbox"
-if [ ! -L ./queue/inbox ]; then
-    mkdir -p "$INBOX_LINUX_DIR"
-    [ -d ./queue/inbox ] && cp ./queue/inbox/*.yaml "$INBOX_LINUX_DIR/" 2>/dev/null && rm -rf ./queue/inbox
-    ln -sf "$INBOX_LINUX_DIR" ./queue/inbox
-    log_info "  └─ inbox → Linux FS ($INBOX_LINUX_DIR) にシンボリックリンク作成"
+# inbox ディレクトリ: WSL2ではLinux FSにシンボリックリンク、macOSでは通常ディレクトリ
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    INBOX_LINUX_DIR="$HOME/.local/share/multi-agent-shogun/inbox"
+    if [ ! -L ./queue/inbox ]; then
+        mkdir -p "$INBOX_LINUX_DIR"
+        [ -d ./queue/inbox ] && cp ./queue/inbox/*.yaml "$INBOX_LINUX_DIR/" 2>/dev/null && rm -rf ./queue/inbox
+        ln -sf "$INBOX_LINUX_DIR" ./queue/inbox
+        log_info "  └─ inbox → Linux FS ($INBOX_LINUX_DIR) にシンボリックリンク作成"
+    fi
+else
+    [ -d ./queue/inbox ] || mkdir -p ./queue/inbox
 fi
 
 if [ "$CLEAN_MODE" = true ]; then
@@ -499,18 +503,18 @@ fi
 tmux split-window -h -t "multiagent:agents"
 tmux split-window -h -t "multiagent:agents"
 
-# 各列を3行に分割
+# 各列を3行に分割（-t で明示的にターゲット指定 — 複数セッション存在時の誤爆防止）
 tmux select-pane -t "multiagent:agents.${PANE_BASE}"
-tmux split-window -v
-tmux split-window -v
+tmux split-window -v -t "multiagent:agents.${PANE_BASE}"
+tmux split-window -v -t "multiagent:agents.${PANE_BASE}"
 
 tmux select-pane -t "multiagent:agents.$((PANE_BASE+3))"
-tmux split-window -v
-tmux split-window -v
+tmux split-window -v -t "multiagent:agents.$((PANE_BASE+3))"
+tmux split-window -v -t "multiagent:agents.$((PANE_BASE+3))"
 
 tmux select-pane -t "multiagent:agents.$((PANE_BASE+6))"
-tmux split-window -v
-tmux split-window -v
+tmux split-window -v -t "multiagent:agents.$((PANE_BASE+6))"
+tmux split-window -v -t "multiagent:agents.$((PANE_BASE+6))"
 
 # ペインラベル設定（プロンプト用: モデル名なし）
 PANE_LABELS=("karo" "ashigaru1" "ashigaru2" "ashigaru3" "ashigaru4" "ashigaru5" "ashigaru6" "ashigaru7" "ashigaru8")
@@ -770,9 +774,10 @@ NINJA_EOF
         [ -f "$SCRIPT_DIR/queue/inbox/${agent}.yaml" ] || echo "messages:" > "$SCRIPT_DIR/queue/inbox/${agent}.yaml"
     done
 
-    # 既存のwatcherと孤児inotifywaitをkill
+    # 既存のwatcherと孤児inotifywait/fswatchをkill
     pkill -f "inbox_watcher.sh" 2>/dev/null || true
     pkill -f "inotifywait.*queue/inbox" 2>/dev/null || true
+    pkill -f "fswatch.*queue/inbox" 2>/dev/null || true
     sleep 1
 
     # 将軍のwatcher（ntfy受信の自動起床に必要）
